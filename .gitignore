@@ -1,0 +1,49 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache/build files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Local datasets
+data/
+Dataset_BUSI_with_GT/
+Dataset_BUSI_with_GT*/
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+# Training outputs and predictions
+outputs*/
+prediction/
+predictions/
+runs/
+logs/
+
+# Model checkpoints and generated artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npy
+*.npz
+
+# Notebook/local editor files
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store
