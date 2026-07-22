@@ -1,9 +1,12 @@
 import torch
 
+from console_utils import configure_utf8_output
 from model import UNet, count_parameters
 
 
 def main() -> None:
+    configure_utf8_output()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet(in_channels=1, out_channels=1, base_channels=16).to(device)
 

@@ -2,10 +2,13 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
+from console_utils import configure_utf8_output
 from dataset import discover_busi_samples
 
 
 def main() -> None:
+    configure_utf8_output()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--include-normal", action="store_true")

@@ -9,6 +9,7 @@ from PIL import Image
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 
+from console_utils import configure_utf8_output
 from model import UNet
 
 
@@ -23,6 +24,8 @@ def parse_args():
 
 
 def main() -> None:
+    configure_utf8_output()
+
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

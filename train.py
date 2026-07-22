@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from console_utils import configure_utf8_output
 from dataset import BUSIDataset, discover_busi_samples
 from losses import BCEDiceLoss, dice_score_from_logits
 from model import UNet, count_parameters
@@ -110,6 +111,8 @@ def run_epoch(
 
 
 def main() -> None:
+    configure_utf8_output()
+
     args = parse_args()
     set_seed(args.seed)
 
