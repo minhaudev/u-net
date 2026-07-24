@@ -329,29 +329,77 @@ def main() -> None:
     if test_loader is not None and best_path.exists():
         checkpoint = torch.load(best_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
-        with torch.no_grad():
-            test_loss, test_dice = run_epoch(
-                model,
-                test_loader,
-                criterion,
-                device,
-            )
+        model.eval()
 
-        with test_metrics_path.open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "test_loss": test_loss,
-                    "test_dice": test_dice,
-                    "checkpoint": str(best_path),
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
+        print("\nĐang tự động tính toán B-IoU, HD95, IoU, Dice trên tập Test...")
+        try:
+            from evaluate_metrics import calculate_iou, calculate_hd95, calculate_boundary_iou, calculate_dice
+            
+            metrics = {"dice": [], "iou": [], "hd95": [], "biou": []}
+            with torch.no_grad():
+                for batch in tqdm(test_loader, desc="Test Metrics"):
+                    images = batch["image"].to(device, non_blocking=True)
+                    clahe_images = batch["clahe"].to(device, non_blocking=True)
+                    masks = batch["mask"].cpu().numpy()
+                    
+                    logits = model(images, clahe_images)
+                    if isinstance(logits, list):
+                        logits_eval = logits[0]
+                    else:
+                        logits_eval = logits
+                        
+                    probs = torch.sigmoid(logits_eval).cpu().numpy()
+                    preds = (probs >= 0.5).astype(np.uint8)
+                    
+                    for i in range(len(preds)):
+                        pred_i = preds[i].squeeze()
+                        mask_i = masks[i].squeeze()
+                        
+                        metrics["dice"].append(calculate_dice(pred_i, mask_i))
+                        metrics["iou"].append(calculate_iou(pred_i, mask_i))
+                        
+                        hd95_val = calculate_hd95(pred_i, mask_i)
+                        if not np.isnan(hd95_val):
+                            metrics["hd95"].append(hd95_val)
+                            
+                        metrics["biou"].append(calculate_boundary_iou(pred_i, mask_i))
+                        
+            test_dice = float(np.mean(metrics["dice"]))
+            test_iou = float(np.mean(metrics["iou"]))
+            test_biou = float(np.mean(metrics["biou"]))
+            test_hd95 = float(np.mean(metrics["hd95"]))
+            
+            with test_metrics_path.open("w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "test_dice": test_dice,
+                        "test_iou": test_iou,
+                        "test_biou": test_biou,
+                        "test_hd95": test_hd95,
+                        "checkpoint": str(best_path),
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
-        print(f"Test loss: {test_loss:.4f}")
-        print(f"Test Dice: {test_dice:.4f}")
-        print(f"Test metrics: {test_metrics_path}")
+            print(f"\nTest Dice  : {test_dice:.4f}")
+            print(f"Test IoU   : {test_iou:.4f}")
+            print(f"Test B-IoU : {test_biou:.4f}")
+            print(f"Test HD95  : {test_hd95:.4f}")
+            print(f"Đã lưu Test metrics vào: {test_metrics_path}")
+
+        except ImportError:
+            print("Không tìm thấy evaluate_metrics.py, quay về tính Test Loss/Dice mặc định.")
+            with torch.no_grad():
+                test_loss, test_dice = run_epoch(
+                    model,
+                    test_loader,
+                    criterion,
+                    device,
+                )
+            print(f"Test loss: {test_loss:.4f}")
+            print(f"Test Dice: {test_dice:.4f}")
     if used_predefined_splits:
         print(
             "\nLƯU Ý NGHIÊN CỨU: đang dùng split train/valid/test có sẵn. "

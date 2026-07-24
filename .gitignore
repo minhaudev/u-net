@@ -17,6 +17,7 @@ dist/
 # Local datasets
 data/
 Dataset_*/
+data_zero_shot_eval/
 *.rar
 *.zip
 *.7z
