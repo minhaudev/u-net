@@ -85,21 +85,15 @@ def discover_busi_samples(data_dir: str | Path, include_normal: bool = False) ->
 
 def discover_flat_mask_samples(data_dir: str | Path) -> list[Sample]:
     """
-    Find image-mask pairs in a flat semantic-segmentation export folder.
-
-    Supported layout:
-      dataset/train/
-        image_001.jpg
-        image_001_mask.png
-      dataset/valid/
-      dataset/test/
+    Find image-mask pairs in a folder recursively.
     """
     data_dir = Path(data_dir)
     if not data_dir.exists():
         raise FileNotFoundError(f"Khong tim thay thu muc du lieu: {data_dir}")
 
+    # Dùng rglob để quét tất cả ảnh kể cả khi nó nằm trong thư mục con (vd: train/benign/...)
     image_files = sorted(
-        p for p in data_dir.iterdir()
+        p for p in data_dir.rglob("*")
         if p.is_file()
         and p.suffix.lower() in VALID_EXTENSIONS
         and not _is_mask(p)
@@ -110,29 +104,27 @@ def discover_flat_mask_samples(data_dir: str | Path) -> list[Sample]:
 
     for image_path in image_files:
         prefix = image_path.stem + "_mask"
+        # Tìm mask nằm cùng thư mục với ảnh gốc
         mask_paths = tuple(sorted(
-            p for p in data_dir.iterdir()
+            p for p in image_path.parent.iterdir()
             if p.is_file()
             and p.suffix.lower() in VALID_EXTENSIONS
             and p.stem.startswith(prefix)
         ))
 
-        if mask_paths:
+        # Ảnh normal có thể không có mask, ta kiểm tra nếu parent name là normal
+        if mask_paths or image_path.parent.name.lower() == "normal":
             samples.append(Sample(image_path=image_path, mask_paths=mask_paths))
         else:
             missing_masks.append(image_path)
 
     if missing_masks:
         examples = ", ".join(p.name for p in missing_masks[:5])
-        raise RuntimeError(
-            f"Co {len(missing_masks)} anh khong co mask trong {data_dir}. "
-            f"Vi du: {examples}"
-        )
+        print(f"Cảnh báo: Có {len(missing_masks)} ảnh không có mask trong {data_dir}. Ví dụ: {examples}")
 
     if not samples:
         raise RuntimeError(
-            f"Khong tim thay cap anh-mask trong {data_dir}. "
-            "Hay kiem tra ten file mask co dang <ten_anh>_mask.png."
+            f"Không tìm thấy cặp ảnh-mask hợp lệ nào trong {data_dir}."
         )
 
     return samples
@@ -143,17 +135,28 @@ def discover_predefined_split_samples(
 ) -> dict[str, list[Sample]]:
     """
     Load datasets that already contain train/valid/test folders.
-
-    Returns an empty dict when the folder is not a predefined split dataset.
+    Tự động tìm thư mục train/valid kể cả khi bị lồng 1 cấp thư mục.
     """
     data_dir = Path(data_dir)
-    train_dir = data_dir / "train"
-    valid_dir = data_dir / "valid"
+    
+    # Tìm nhanh thư mục train bên trong data_dir
+    train_dir = None
+    for p in data_dir.rglob("train"):
+        if p.is_dir():
+            train_dir = p
+            break
+            
+    if not train_dir:
+        return {}
+        
+    # Từ thư mục cha của train, tìm valid và test
+    parent_dir = train_dir.parent
+    valid_dir = parent_dir / "valid"
     if not valid_dir.exists():
-        valid_dir = data_dir / "val"
-    test_dir = data_dir / "test"
+        valid_dir = parent_dir / "val"
+    test_dir = parent_dir / "test"
 
-    if not train_dir.exists() or not valid_dir.exists():
+    if not valid_dir.exists():
         return {}
 
     splits = {
