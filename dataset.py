@@ -6,6 +6,7 @@ from typing import Iterable
 import random
 
 import numpy as np
+import cv2
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -82,6 +83,89 @@ def discover_busi_samples(data_dir: str | Path, include_normal: bool = False) ->
     return samples
 
 
+def discover_flat_mask_samples(data_dir: str | Path) -> list[Sample]:
+    """
+    Find image-mask pairs in a flat semantic-segmentation export folder.
+
+    Supported layout:
+      dataset/train/
+        image_001.jpg
+        image_001_mask.png
+      dataset/valid/
+      dataset/test/
+    """
+    data_dir = Path(data_dir)
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Khong tim thay thu muc du lieu: {data_dir}")
+
+    image_files = sorted(
+        p for p in data_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in VALID_EXTENSIONS
+        and not _is_mask(p)
+    )
+
+    samples: list[Sample] = []
+    missing_masks: list[Path] = []
+
+    for image_path in image_files:
+        prefix = image_path.stem + "_mask"
+        mask_paths = tuple(sorted(
+            p for p in data_dir.iterdir()
+            if p.is_file()
+            and p.suffix.lower() in VALID_EXTENSIONS
+            and p.stem.startswith(prefix)
+        ))
+
+        if mask_paths:
+            samples.append(Sample(image_path=image_path, mask_paths=mask_paths))
+        else:
+            missing_masks.append(image_path)
+
+    if missing_masks:
+        examples = ", ".join(p.name for p in missing_masks[:5])
+        raise RuntimeError(
+            f"Co {len(missing_masks)} anh khong co mask trong {data_dir}. "
+            f"Vi du: {examples}"
+        )
+
+    if not samples:
+        raise RuntimeError(
+            f"Khong tim thay cap anh-mask trong {data_dir}. "
+            "Hay kiem tra ten file mask co dang <ten_anh>_mask.png."
+        )
+
+    return samples
+
+
+def discover_predefined_split_samples(
+    data_dir: str | Path,
+) -> dict[str, list[Sample]]:
+    """
+    Load datasets that already contain train/valid/test folders.
+
+    Returns an empty dict when the folder is not a predefined split dataset.
+    """
+    data_dir = Path(data_dir)
+    train_dir = data_dir / "train"
+    valid_dir = data_dir / "valid"
+    if not valid_dir.exists():
+        valid_dir = data_dir / "val"
+    test_dir = data_dir / "test"
+
+    if not train_dir.exists() or not valid_dir.exists():
+        return {}
+
+    splits = {
+        "train": discover_flat_mask_samples(train_dir),
+        "valid": discover_flat_mask_samples(valid_dir),
+    }
+    if test_dir.exists():
+        splits["test"] = discover_flat_mask_samples(test_dir)
+
+    return splits
+
+
 def load_merged_mask(mask_paths: Iterable[Path], image_size: tuple[int, int]) -> Image.Image:
     mask_paths = list(mask_paths)
     if not mask_paths:
@@ -96,6 +180,17 @@ def load_merged_mask(mask_paths: Iterable[Path], image_size: tuple[int, int]) ->
         merged = np.maximum(merged, (mask_np > 127).astype(np.uint8) * 255)
 
     return Image.fromarray(merged, mode="L")
+
+
+def apply_clahe(image: Image.Image) -> Image.Image:
+    """
+    Áp dụng thuật toán CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    lên ảnh siêu âm gốc để làm nổi bật viền khối u.
+    """
+    img_np = np.array(image)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe_np = clahe.apply(img_np)
+    return Image.fromarray(clahe_np, mode="L")
 
 
 class BUSIDataset(Dataset):
@@ -116,10 +211,16 @@ class BUSIDataset(Dataset):
         sample = self.samples[index]
 
         image = Image.open(sample.image_path).convert("L")
+        clahe_image = apply_clahe(image)
         mask = load_merged_mask(sample.mask_paths, image.size)
 
         image = TF.resize(
             image,
+            [self.image_size, self.image_size],
+            interpolation=InterpolationMode.BILINEAR,
+        )
+        clahe_image = TF.resize(
+            clahe_image,
             [self.image_size, self.image_size],
             interpolation=InterpolationMode.BILINEAR,
         )
@@ -132,11 +233,18 @@ class BUSIDataset(Dataset):
         if self.augment:
             if random.random() < 0.5:
                 image = TF.hflip(image)
+                clahe_image = TF.hflip(clahe_image)
                 mask = TF.hflip(mask)
 
             angle = random.uniform(-12.0, 12.0)
             image = TF.rotate(
                 image,
+                angle,
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0,
+            )
+            clahe_image = TF.rotate(
+                clahe_image,
                 angle,
                 interpolation=InterpolationMode.BILINEAR,
                 fill=0,
@@ -149,15 +257,21 @@ class BUSIDataset(Dataset):
             )
 
             if random.random() < 0.5:
-                image = TF.adjust_contrast(image, random.uniform(0.85, 1.15))
+                contrast_factor = random.uniform(0.85, 1.15)
+                image = TF.adjust_contrast(image, contrast_factor)
+                clahe_image = TF.adjust_contrast(clahe_image, contrast_factor)
             if random.random() < 0.3:
-                image = TF.adjust_brightness(image, random.uniform(0.90, 1.10))
+                brightness_factor = random.uniform(0.90, 1.10)
+                image = TF.adjust_brightness(image, brightness_factor)
+                clahe_image = TF.adjust_brightness(clahe_image, brightness_factor)
 
         image_t = TF.to_tensor(image)  # [1,H,W], 0..1
+        clahe_t = TF.to_tensor(clahe_image)
         mask_t = (TF.to_tensor(mask) > 0.5).float()
 
         return {
             "image": image_t,
+            "clahe": clahe_t,
             "mask": mask_t,
             "image_path": str(sample.image_path),
         }

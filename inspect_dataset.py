@@ -3,7 +3,7 @@ from collections import Counter
 from pathlib import Path
 
 from console_utils import configure_utf8_output
-from dataset import discover_busi_samples
+from dataset import discover_busi_samples, discover_predefined_split_samples
 
 
 def main() -> None:
@@ -14,7 +14,16 @@ def main() -> None:
     parser.add_argument("--include-normal", action="store_true")
     args = parser.parse_args()
 
-    samples = discover_busi_samples(args.data_dir, include_normal=args.include_normal)
+    split_samples = discover_predefined_split_samples(args.data_dir)
+    if split_samples:
+        print("Phat hien dataset co san train/valid/test:")
+        for split_name, samples in split_samples.items():
+            multi_masks = sum(len(s.mask_paths) > 1 for s in samples)
+            print(f"  {split_name}: {len(samples)} anh, {multi_masks} anh co nhieu mask")
+        samples = [sample for split in split_samples.values() for sample in split]
+    else:
+        samples = discover_busi_samples(args.data_dir, include_normal=args.include_normal)
+
     groups = Counter(s.image_path.parent.name for s in samples)
     multi_masks = sum(len(s.mask_paths) > 1 for s in samples)
 

@@ -13,8 +13,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from console_utils import configure_utf8_output
-from dataset import BUSIDataset, discover_busi_samples
-from losses import BCEDiceLoss, dice_score_from_logits
+from dataset import (
+    BUSIDataset,
+    discover_busi_samples,
+    discover_predefined_split_samples,
+)
+from losses import dice_score_from_logits, FocalTverskyLoss, DeepSupervisionLoss
 from model import UNet, count_parameters
 
 
@@ -57,6 +61,28 @@ def split_samples(samples: list[Any], val_ratio: float, seed: int):
     return train_samples, val_samples
 
 
+def load_data_splits(args: argparse.Namespace):
+    predefined_splits = discover_predefined_split_samples(args.data_dir)
+    if predefined_splits:
+        return (
+            predefined_splits["train"],
+            predefined_splits["valid"],
+            predefined_splits.get("test", []),
+            True,
+        )
+
+    all_samples = discover_busi_samples(
+        args.data_dir,
+        include_normal=args.include_normal,
+    )
+    train_samples, val_samples = split_samples(
+        all_samples,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
+    return train_samples, val_samples, [], False
+
+
 def run_epoch(
     model,
     loader,
@@ -75,6 +101,7 @@ def run_epoch(
     progress = tqdm(loader, leave=False)
     for batch in progress:
         images = batch["image"].to(device, non_blocking=True)
+        clahe_images = batch["clahe"].to(device, non_blocking=True)
         masks = batch["mask"].to(device, non_blocking=True)
         batch_size = images.size(0)
 
@@ -87,8 +114,14 @@ def run_epoch(
             dtype=torch.float16 if device.type == "cuda" else torch.bfloat16,
             enabled=autocast_enabled,
         ):
-            logits = model(images)
-            loss = criterion(logits, masks)
+            logits = model(images, clahe_images)
+            
+            if isinstance(logits, list):
+                loss = criterion(logits, masks)
+                logits_eval = logits[0]
+            else:
+                loss = criterion([logits], masks)
+                logits_eval = logits
 
         if is_train:
             assert scaler is not None
@@ -96,7 +129,7 @@ def run_epoch(
             scaler.step(optimizer)
             scaler.update()
 
-        dice = dice_score_from_logits(logits.detach(), masks)
+        dice = dice_score_from_logits(logits_eval.detach(), masks)
 
         total_loss += loss.item() * batch_size
         total_dice += dice.item() * batch_size
@@ -124,15 +157,8 @@ def main() -> None:
     )
     pin_memory = device.type == "cuda"
 
-    all_samples = discover_busi_samples(
-        args.data_dir,
-        include_normal=args.include_normal,
-    )
-    train_samples, val_samples = split_samples(
-        all_samples,
-        val_ratio=args.val_ratio,
-        seed=args.seed,
-    )
+    train_samples, val_samples, test_samples, used_predefined_splits = load_data_splits(args)
+    all_samples = train_samples + val_samples + test_samples
 
     train_dataset = BUSIDataset(
         train_samples,
@@ -144,6 +170,11 @@ def main() -> None:
         image_size=args.image_size,
         augment=False,
     )
+    test_dataset = BUSIDataset(
+        test_samples,
+        image_size=args.image_size,
+        augment=False,
+    ) if test_samples else None
 
     train_loader = DataLoader(
         train_dataset,
@@ -159,6 +190,13 @@ def main() -> None:
         num_workers=args.workers,
         pin_memory=pin_memory,
     )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=pin_memory,
+    ) if test_dataset is not None else None
 
     model = UNet(
         in_channels=1,
@@ -166,7 +204,10 @@ def main() -> None:
         base_channels=args.base_channels,
     ).to(device)
 
-    criterion = BCEDiceLoss()
+    criterion = DeepSupervisionLoss(
+        base_criterion=FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=0.75),
+        weights=(1.0, 0.5, 0.25, 0.125)
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -187,6 +228,8 @@ def main() -> None:
     print(f"Thiết bị             : {device}")
     print(f"Tổng số ảnh          : {len(all_samples)}")
     print(f"Train / Validation   : {len(train_samples)} / {len(val_samples)}")
+    print(f"Test                 : {len(test_samples)}")
+    print(f"Chế độ chia dữ liệu  : {'train/valid/test có sẵn' if used_predefined_splits else 'chia ngẫu nhiên'}")
     print(f"Số tham số mô hình   : {count_parameters(model):,}")
     print(f"Kích thước ảnh       : {args.image_size} x {args.image_size}")
     print("=" * 70)
@@ -194,6 +237,7 @@ def main() -> None:
     history_path = output_dir / "history.csv"
     best_path = output_dir / "best_unet.pt"
     config_path = output_dir / "config.json"
+    test_metrics_path = output_dir / "test_metrics.json"
 
     with config_path.open("w", encoding="utf-8") as f:
         json.dump(vars(args), f, ensure_ascii=False, indent=2)
@@ -278,11 +322,43 @@ def main() -> None:
     print("\nHoàn thành.")
     print(f"Best validation Dice: {best_dice:.4f}")
     print(f"Checkpoint: {best_path}")
-    print(
-        "\nLƯU Ý NGHIÊN CỨU: cách chia ngẫu nhiên trong file này chỉ dùng để "
-        "test pipeline. Khi làm bài báo, hãy chia theo bệnh nhân hoặc dùng fold "
-        "chính thức của BUS-BRA để tránh rò rỉ dữ liệu."
-    )
+    if test_loader is not None and best_path.exists():
+        checkpoint = torch.load(best_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        with torch.no_grad():
+            test_loss, test_dice = run_epoch(
+                model,
+                test_loader,
+                criterion,
+                device,
+            )
+
+        with test_metrics_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "test_loss": test_loss,
+                    "test_dice": test_dice,
+                    "checkpoint": str(best_path),
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        print(f"Test loss: {test_loss:.4f}")
+        print(f"Test Dice: {test_dice:.4f}")
+        print(f"Test metrics: {test_metrics_path}")
+    if used_predefined_splits:
+        print(
+            "\nLƯU Ý NGHIÊN CỨU: đang dùng split train/valid/test có sẵn. "
+            "Dùng validation để chọn mô hình và chỉ báo cáo test độc lập sau cùng."
+        )
+    else:
+        print(
+            "\nLƯU Ý NGHIÊN CỨU: cách chia ngẫu nhiên trong file này chỉ dùng để "
+            "test pipeline. Khi làm bài báo, hãy chia theo bệnh nhân hoặc dùng fold "
+            "chính thức của BUS-BRA để tránh rò rỉ dữ liệu."
+        )
 
 
 if __name__ == "__main__":

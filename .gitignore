@@ -16,8 +16,7 @@ dist/
 
 # Local datasets
 data/
-Dataset_BUSI_with_GT/
-Dataset_BUSI_with_GT*/
+Dataset_*/
 *.rar
 *.zip
 *.7z

@@ -2,3 +2,6 @@ numpy>=1.26
 Pillow>=10.0
 tqdm>=4.66
 matplotlib>=3.8
+torch>=2.0
+torchvision>=0.15
+opencv-python>=4.8
