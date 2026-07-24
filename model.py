@@ -113,9 +113,11 @@ class UNet(nn.Module):
         in_channels: int = 1,
         out_channels: int = 1,
         base_channels: int = 16,
+        input_mode: str = "gating",
     ) -> None:
         super().__init__()
         c = base_channels
+        self.input_mode = input_mode
         
         # Spatial Gating Fusion
         self.fusion = SpatialGatingFusion(in_channels=in_channels)
@@ -140,8 +142,14 @@ class UNet(nn.Module):
         self.outc_ds3 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor, x_clahe: torch.Tensor):
-        # Bước trộn ảnh ngay đầu vào Encoder
-        fused_x = self.fusion(x, x_clahe)
+        # Tùy chọn nhánh Ablation
+        if self.input_mode == "orig":
+            fused_x = x
+        elif self.input_mode == "clahe":
+            fused_x = x_clahe
+        else:
+            # Bước trộn ảnh ngay đầu vào Encoder (Spatial Gating)
+            fused_x = self.fusion(x, x_clahe)
         
         x1 = self.inc(fused_x)
         x2 = self.down1(x1)

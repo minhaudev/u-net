@@ -37,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--include-normal", action="store_true")
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--input-mode", type=str, default="gating", choices=["gating", "orig", "clahe"], help="Chọn nhánh để test ablation")
     return parser.parse_args()
 
 
@@ -202,6 +203,7 @@ def main() -> None:
         in_channels=1,
         out_channels=1,
         base_channels=args.base_channels,
+        input_mode=args.input_mode,
     ).to(device)
 
     criterion = DeepSupervisionLoss(
@@ -230,14 +232,15 @@ def main() -> None:
     print(f"Train / Validation   : {len(train_samples)} / {len(val_samples)}")
     print(f"Test                 : {len(test_samples)}")
     print(f"Chế độ chia dữ liệu  : {'train/valid/test có sẵn' if used_predefined_splits else 'chia ngẫu nhiên'}")
+    print(f"Chế độ chạy (Input Mode): {args.input_mode.upper()}")
     print(f"Số tham số mô hình   : {count_parameters(model):,}")
     print(f"Kích thước ảnh       : {args.image_size} x {args.image_size}")
     print("=" * 70)
 
-    history_path = output_dir / "history.csv"
-    best_path = output_dir / "best_unet.pt"
-    config_path = output_dir / "config.json"
-    test_metrics_path = output_dir / "test_metrics.json"
+    history_path = output_dir / f"history_{args.input_mode}.csv"
+    best_path = output_dir / f"best_unet_{args.input_mode}.pt"
+    config_path = output_dir / f"config_{args.input_mode}.json"
+    test_metrics_path = output_dir / f"test_metrics_{args.input_mode}.json"
 
     with config_path.open("w", encoding="utf-8") as f:
         json.dump(vars(args), f, ensure_ascii=False, indent=2)
@@ -308,6 +311,7 @@ def main() -> None:
                         "model_state_dict": model.state_dict(),
                         "base_channels": args.base_channels,
                         "image_size": args.image_size,
+                        "input_mode": args.input_mode,
                         "best_val_dice": best_dice,
                     },
                     best_path,
