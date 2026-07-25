@@ -4,8 +4,8 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import BUSIDataset, discover_busi_samples, discover_predefined_split_samples
-from model import UNet
+from dataset import BUSIDataset, discover_any_dataset
+from model import UNet, AttentionUNetFusion
 
 # Import các hàm tính toán từ file evaluate_metrics vừa tạo
 from evaluate_metrics import calculate_iou, calculate_hd95, calculate_boundary_iou, calculate_dice
@@ -40,17 +40,17 @@ def main():
         return
     
     # 2. Setup Model
-    model = UNet(in_channels=1, out_channels=1, base_channels=base_channels, input_mode=input_mode).to(device)
+    if input_mode == "fusion":
+        model = AttentionUNetFusion(in_channels=1, out_channels=1, base_channels=base_channels).to(device)
+    else:
+        model = UNet(in_channels=1, out_channels=1, base_channels=base_channels, input_mode=input_mode).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
     # 3. Load Target Data
-    # Đã là zero-shot thì gom toàn bộ dữ liệu của target dataset (Train+Val+Test) vào để test.
-    predefined_splits = discover_predefined_split_samples(args.target_dir)
-    if predefined_splits:
-        all_samples = predefined_splits.get("train", []) + predefined_splits.get("valid", []) + predefined_splits.get("test", [])
-    else:
-        all_samples = discover_busi_samples(args.target_dir, include_normal=False)
+    # Đã là zero-shot thì gom toàn bộ dữ liệu của target dataset vào để test.
+    # Sử dụng hàm đa năng để tự động phát hiện cấu trúc (BUSI, BrEaST, BUS-UCLM, v.v.)
+    all_samples = discover_any_dataset(args.target_dir)
 
     print(f"Đã tìm thấy {len(all_samples)} ảnh trong tập Zero-Shot Target.")
     

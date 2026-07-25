@@ -278,3 +278,58 @@ class BUSIDataset(Dataset):
             "mask": mask_t,
             "image_path": str(sample.image_path),
         }
+
+def discover_any_dataset(data_dir: str | Path) -> list[Sample]:
+    """
+    Hàm tự động phát hiện mọi cấu trúc dữ liệu (BUSI, BrEaST, BUS-UCLM, v.v.)
+    """
+    data_dir = Path(data_dir)
+    samples: list[Sample] = []
+    
+    # 1. Kiểm tra cấu trúc BUS-UCLM (Có thư mục images/ và masks/ riêng, tên file giống nhau)
+    images_dir = data_dir / "images"
+    masks_dir = data_dir / "masks"
+    if images_dir.exists() and masks_dir.exists():
+        for img_path in sorted(images_dir.glob("*.*")):
+            if img_path.suffix.lower() not in VALID_EXTENSIONS: continue
+            mask_path = masks_dir / img_path.name
+            if mask_path.exists():
+                samples.append(Sample(image_path=img_path, mask_paths=(mask_path,)))
+        if samples: return samples
+        
+    # 2. Kiểm tra cấu trúc có train/valid/test
+    splits = discover_predefined_split_samples(data_dir)
+    if splits:
+        for split in splits.values():
+            samples.extend(split)
+        if samples: return samples
+        
+    # 3. Kiểm tra cấu trúc BUSI (Thư mục benign, malignant, normal chứa chung ảnh và mask _mask)
+    try:
+        samples = discover_busi_samples(data_dir)
+        if samples: return samples
+    except Exception:
+        pass
+        
+    # 4. Kiểm tra cấu trúc phẳng như BrEaST (Ảnh gốc và mask nằm chung thư mục nhưng mask có hậu tố _tumor, _other, _mask)
+    mask_keywords = ["_mask", "_tumor", "_other", "_gt"]
+    image_files = sorted(
+        p for p in data_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS
+        and not any(k in p.stem.lower() for k in mask_keywords)
+    )
+    for img_path in image_files:
+        # Tìm các file mask bắt đầu bằng tên ảnh gốc + "_"
+        mask_paths = tuple(sorted(
+            p for p in img_path.parent.iterdir()
+            if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS
+            and p.stem.startswith(img_path.stem + "_")
+            and any(k in p.stem.lower() for k in mask_keywords)
+        ))
+        if mask_paths:
+            samples.append(Sample(image_path=img_path, mask_paths=mask_paths))
+            
+    if not samples:
+        raise RuntimeError(f"Không thể tự động nhận diện cấu trúc dataset tại {data_dir}. Vui lòng kiểm tra lại data!")
+        
+    return samples
