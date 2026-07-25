@@ -19,7 +19,7 @@ from dataset import (
     discover_predefined_split_samples,
 )
 from losses import dice_score_from_logits, FocalTverskyLoss, DeepSupervisionLoss
-from model import UNet, count_parameters
+from model import UNet, AttentionUNetFusion, count_parameters
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--include-normal", action="store_true")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--input-mode", type=str, default="gating", choices=["gating", "orig", "clahe"], help="Chọn nhánh để test ablation")
+    parser.add_argument("--input-mode", type=str, default="gating", choices=["gating", "orig", "clahe", "fusion"], help="Chọn nhánh để test ablation")
     return parser.parse_args()
 
 
@@ -199,12 +199,19 @@ def main() -> None:
         pin_memory=pin_memory,
     ) if test_dataset is not None else None
 
-    model = UNet(
-        in_channels=1,
-        out_channels=1,
-        base_channels=args.base_channels,
-        input_mode=args.input_mode,
-    ).to(device)
+    if args.input_mode == "fusion":
+        model = AttentionUNetFusion(
+            in_channels=1,
+            out_channels=1,
+            base_channels=args.base_channels,
+        ).to(device)
+    else:
+        model = UNet(
+            in_channels=1,
+            out_channels=1,
+            base_channels=args.base_channels,
+            input_mode=args.input_mode,
+        ).to(device)
 
     criterion = DeepSupervisionLoss(
         base_criterion=FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=0.75),
