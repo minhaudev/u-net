@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, CA_UNet, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, CAMLP_UNet, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -46,6 +46,22 @@ def main():
     
     assert isinstance(outputs_ca_train, list) and len(outputs_ca_train) == 4, "Train mode should return 4 outputs"
     assert output_ca_eval.shape == (2, 1, 256, 256), "Eval output shape mismatch!"
+    
+    print("\n=== Testing CAMLP-UNet (Coordinate Attention + Tokenized MLP) ===")
+    model_camlp = CAMLP_UNet(in_channels=1, out_channels=1, base_channels=16)
+    print(f"Total Trainable Parameters (CAMLP-UNet): {count_parameters(model_camlp):,}")
+    
+    model_camlp.train()
+    outputs_camlp_train = model_camlp(x_orig)
+    print(f"Outputs in Train Mode (List length): {len(outputs_camlp_train)}")
+    
+    model_camlp.eval()
+    with torch.no_grad():
+        output_camlp_eval = model_camlp(x_orig)
+    print(f"Output Shape in Eval Mode: {output_camlp_eval.shape}")
+    
+    assert isinstance(outputs_camlp_train, list) and len(outputs_camlp_train) == 4, "Train mode should return 4 outputs"
+    assert output_camlp_eval.shape == (2, 1, 256, 256), "Eval output shape mismatch!"
     
     print("All tests passed successfully!")
 

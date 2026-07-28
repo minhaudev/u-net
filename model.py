@@ -545,5 +545,94 @@ class CA_UNet(nn.Module):
             return final_out
 
 
+# --- CÁC COMPONENT CAMLP_UNET (CA-UNET + TOKENIZED MLP TỪ UNEXT) ---
+
+class TokenizedMLP(nn.Module):
+    """
+    Lấy cảm hứng từ khối Tokenized MLP của UNeXt.
+    Kết hợp Depthwise Convolution (trộn không gian cục bộ) và MLP 1x1 (trộn kênh toàn cục).
+    """
+    def __init__(self, dim, expansion_ratio=2):
+        super().__init__()
+        hidden_dim = int(dim * expansion_ratio)
+        
+        # Tokenization / Trộn không gian
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
+        self.norm = nn.BatchNorm2d(dim)
+        
+        # Mạng Perceptron đa tầng (MLP) / Trộn kênh
+        self.mlp = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, kernel_size=1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, dim, kernel_size=1, bias=False)
+        )
+        
+    def forward(self, x):
+        identity = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.mlp(x)
+        return x + identity
+
+
+class CAMLP_UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        
+        self.inc = ResidualDSConv(in_channels, c)
+        
+        # Encoder (Dùng lại của CA_UNet)
+        self.down1 = AttDown(c, c * 2)
+        self.down2 = AttDown(c * 2, c * 4)
+        self.down3 = AttDown(c * 4, c * 8)
+        self.down4 = AttDown(c * 8, c * 16)
+        
+        # Bottleneck (Thay ASPP bằng Tokenized MLP Block)
+        # Expansion ratio = 2 để cân bằng giữa sức mạnh và số lượng tham số
+        self.bottleneck = nn.Sequential(
+            TokenizedMLP(c * 16, expansion_ratio=2),
+            TokenizedMLP(c * 16, expansion_ratio=2)
+        )
+        
+        # Decoder với Coordinate Attention (Dùng lại của CA_UNet)
+        self.up1 = CAUp(c * 16, c * 8, c * 8)
+        self.up2 = CAUp(c * 8, c * 4, c * 4)
+        self.up3 = CAUp(c * 4, c * 2, c * 2)
+        self.up4 = CAUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        # Deep supervision outputs
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        # Áp dụng Tokenized MLP ở đáy mạng thay cho ASPP
+        x5 = self.bottleneck(x5)
+        
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
