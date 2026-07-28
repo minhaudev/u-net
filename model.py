@@ -389,5 +389,161 @@ class AttentionUNetFusion(nn.Module):
             return final_out
 
 
+# --- CÁC COMPONENT CA_UNET (CHỈ DÙNG 1 ẢNH GỐC) ---
+
+class CoordAtt(nn.Module):
+    def __init__(self, inp, oup, reduction=8):
+        super(CoordAtt, self).__init__()
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        mip = max(8, inp // reduction)
+
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = nn.SiLU()
+        
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        
+    def forward(self, x):
+        identity = x
+        
+        n, c, h, w = x.size()
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)
+
+        y = torch.cat([x_h, x_w], dim=2)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act(y) 
+        
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+        return out
+
+
+class LightweightASPP(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        mid_c = out_channels // 2
+        
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, mid_c, 1, bias=False),
+            nn.BatchNorm2d(mid_c),
+            nn.ReLU(inplace=True)
+        )
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, padding=2, dilation=2, groups=in_channels, bias=False),
+            nn.Conv2d(in_channels, mid_c, 1, bias=False),
+            nn.BatchNorm2d(mid_c),
+            nn.ReLU(inplace=True)
+        )
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, 3, padding=4, dilation=4, groups=in_channels, bias=False),
+            nn.Conv2d(in_channels, mid_c, 1, bias=False),
+            nn.BatchNorm2d(mid_c),
+            nn.ReLU(inplace=True)
+        )
+        self.branch_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(in_channels, mid_c, 1, bias=False),
+            nn.BatchNorm2d(mid_c),
+            nn.ReLU(inplace=True)
+        )
+        self.conv_out = nn.Sequential(
+            nn.Conv2d(mid_c * 4, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        bp = self.branch_pool(x)
+        bp = F.interpolate(bp, size=x.shape[2:], mode='bilinear', align_corners=False)
+        
+        out = torch.cat([b1, b2, b3, bp], dim=1)
+        return self.conv_out(out)
+
+
+class CAUp(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.ca = CoordAtt(skip_channels, skip_channels, reduction=4)
+        self.conv = ResidualDSConv(in_channels + skip_channels, out_channels)
+        
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2,
+                          diffY // 2, diffY - diffY // 2])
+        
+        skip = self.ca(skip)
+        x = torch.cat([skip, x], dim=1)
+        return self.conv(x)
+
+
+class CA_UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        
+        self.inc = ResidualDSConv(in_channels, c)
+        
+        self.down1 = AttDown(c, c * 2)
+        self.down2 = AttDown(c * 2, c * 4)
+        self.down3 = AttDown(c * 4, c * 8)
+        self.down4 = AttDown(c * 8, c * 16)
+        
+        self.aspp = LightweightASPP(c * 16, c * 16)
+        
+        self.up1 = CAUp(c * 16, c * 8, c * 8)
+        self.up2 = CAUp(c * 8, c * 4, c * 4)
+        self.up3 = CAUp(c * 4, c * 2, c * 2)
+        self.up4 = CAUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    # Chấp nhận tham số thứ 2 (_x_clahe) để tương thích với API huấn luyện nhưng không sử dụng nó
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        x5 = self.aspp(x5)
+        
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -30,7 +30,24 @@ def main():
     
     assert isinstance(outputs_train, list) and len(outputs_train) == 4, "Train mode should return 4 outputs"
     assert output_eval.shape == (2, 1, 256, 256), "Eval output shape mismatch!"
-    print("Test passed successfully!")
+    
+    print("\n=== Testing CA-UNet (Coordinate Attention + ASPP) ===")
+    model_ca = CA_UNet(in_channels=1, out_channels=1, base_channels=16)
+    print(f"Total Trainable Parameters (CA-UNet): {count_parameters(model_ca):,}")
+    
+    model_ca.train()
+    outputs_ca_train = model_ca(x_orig)
+    print(f"Outputs in Train Mode (List length): {len(outputs_ca_train)}")
+    
+    model_ca.eval()
+    with torch.no_grad():
+        output_ca_eval = model_ca(x_orig)
+    print(f"Output Shape in Eval Mode: {output_ca_eval.shape}")
+    
+    assert isinstance(outputs_ca_train, list) and len(outputs_ca_train) == 4, "Train mode should return 4 outputs"
+    assert output_ca_eval.shape == (2, 1, 256, 256), "Eval output shape mismatch!"
+    
+    print("All tests passed successfully!")
 
 if __name__ == "__main__":
     main()

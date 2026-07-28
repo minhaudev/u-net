@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import BUSIDataset, discover_any_dataset
-from model import UNet, AttentionUNetFusion
+from model import UNet, AttentionUNetFusion, CA_UNet
 
 # Import các hàm tính toán từ file evaluate_metrics vừa tạo
 from evaluate_metrics import calculate_iou, calculate_hd95, calculate_boundary_iou, calculate_dice
@@ -42,6 +42,8 @@ def main():
     # 2. Setup Model
     if input_mode == "fusion":
         model = AttentionUNetFusion(in_channels=1, out_channels=1, base_channels=base_channels).to(device)
+    elif input_mode == "ca_unet":
+        model = CA_UNet(in_channels=1, out_channels=1, base_channels=base_channels).to(device)
     else:
         model = UNet(in_channels=1, out_channels=1, base_channels=base_channels, input_mode=input_mode).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
