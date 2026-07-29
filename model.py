@@ -545,65 +545,66 @@ class CA_UNet(nn.Module):
             return final_out
 
 
-# --- CÁC COMPONENT CAMLP_UNET (CA-UNET + TOKENIZED MLP TỪ UNEXT) ---
+# --- CÁC COMPONENT ECA_UNET (EFFICIENT CHANNEL ATTENTION) ---
 
-class TokenizedMLP(nn.Module):
+class ECA_Module(nn.Module):
     """
-    Lấy cảm hứng từ khối Tokenized MLP của UNeXt.
-    Kết hợp Depthwise Convolution (trộn không gian cục bộ) và MLP 1x1 (trộn kênh toàn cục).
+    Efficient Channel Attention (ECA)
+    Chỉ dùng 1D Conv trên kênh (channel) để không làm tăng tham số.
     """
-    def __init__(self, dim, expansion_ratio=2):
-        super().__init__()
-        hidden_dim = int(dim * expansion_ratio)
+    def __init__(self, channels, b=1, gamma=2):
+        super(ECA_Module, self).__init__()
+        import math
+        t = int(abs((math.log(channels, 2) + b) / gamma))
+        k_size = t if t % 2 else t + 1
         
-        # Tokenization / Trộn không gian
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, groups=dim, bias=False)
-        self.norm = nn.BatchNorm2d(dim)
-        
-        # Mạng Perceptron đa tầng (MLP) / Trộn kênh
-        self.mlp = nn.Sequential(
-            nn.Conv2d(dim, hidden_dim, kernel_size=1, bias=False),
-            nn.GELU(),
-            nn.Conv2d(hidden_dim, dim, kernel_size=1, bias=False)
-        )
-        
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
     def forward(self, x):
-        identity = x
-        x = self.dwconv(x)
-        x = self.norm(x)
-        x = self.mlp(x)
-        return x + identity
+        y = self.avg_pool(x)
+        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+        y = self.sigmoid(y)
+        return x * y.expand_as(x)
 
 
-class CAMLP_UNet(nn.Module):
+class ECAUp(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.eca = ECA_Module(skip_channels)
+        self.conv = ResidualDSConv(in_channels + skip_channels, out_channels)
+        
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        skip = self.eca(skip)
+        x = torch.cat([skip, x], dim=1)
+        return self.conv(x)
+
+
+class ECA_UNet(nn.Module):
     def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
         super().__init__()
         c = base_channels
-        
         self.inc = ResidualDSConv(in_channels, c)
         
-        # Encoder (Dùng lại của CA_UNet)
         self.down1 = AttDown(c, c * 2)
         self.down2 = AttDown(c * 2, c * 4)
         self.down3 = AttDown(c * 4, c * 8)
         self.down4 = AttDown(c * 8, c * 16)
         
-        # Bottleneck (Thay ASPP bằng Tokenized MLP Block)
-        # Expansion ratio = 2 để cân bằng giữa sức mạnh và số lượng tham số
-        self.bottleneck = nn.Sequential(
-            TokenizedMLP(c * 16, expansion_ratio=2),
-            TokenizedMLP(c * 16, expansion_ratio=2)
-        )
-        
-        # Decoder với Coordinate Attention (Dùng lại của CA_UNet)
-        self.up1 = CAUp(c * 16, c * 8, c * 8)
-        self.up2 = CAUp(c * 8, c * 4, c * 4)
-        self.up3 = CAUp(c * 4, c * 2, c * 2)
-        self.up4 = CAUp(c * 2, c, c)
+        self.up1 = ECAUp(c * 16, c * 8, c * 8)
+        self.up2 = ECAUp(c * 8, c * 4, c * 4)
+        self.up3 = ECAUp(c * 4, c * 2, c * 2)
+        self.up4 = ECAUp(c * 2, c, c)
         
         self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
         
-        # Deep supervision outputs
         self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
         self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
         self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
@@ -615,8 +616,88 @@ class CAMLP_UNet(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
         
-        # Áp dụng Tokenized MLP ở đáy mạng thay cho ASPP
-        x5 = self.bottleneck(x5)
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
+# --- CÁC COMPONENT SIMAM_UNET (PARAMETER-FREE ATTENTION) ---
+
+class SimAM_Module(nn.Module):
+    """
+    SimAM: A Simple, Parameter-Free Attention Module
+    Tính attention weight dựa trên hàm năng lượng không gian 3D, 0 tham số.
+    """
+    def __init__(self, e_lambda=1e-4):
+        super(SimAM_Module, self).__init__()
+        self.activation = nn.Sigmoid()
+        self.e_lambda = e_lambda
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        n = w * h - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+        return x * self.activation(y)
+
+
+class SimAMUp(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.simam = SimAM_Module()
+        self.conv = ResidualDSConv(in_channels + skip_channels, out_channels)
+        
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        skip = self.simam(skip)
+        x = torch.cat([skip, x], dim=1)
+        return self.conv(x)
+
+
+class SimAM_UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        self.inc = ResidualDSConv(in_channels, c)
+        
+        self.down1 = AttDown(c, c * 2)
+        self.down2 = AttDown(c * 2, c * 4)
+        self.down3 = AttDown(c * 4, c * 8)
+        self.down4 = AttDown(c * 8, c * 16)
+        
+        self.up1 = SimAMUp(c * 16, c * 8, c * 8)
+        self.up2 = SimAMUp(c * 8, c * 4, c * 4)
+        self.up3 = SimAMUp(c * 4, c * 2, c * 2)
+        self.up4 = SimAMUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
         
         d1 = self.up1(x5, x4)
         d2 = self.up2(d1, x3)
