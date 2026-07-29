@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, SMP_MobileNet_Lite, SMP_MobileNetV3_Micro, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -103,6 +103,28 @@ def main():
     with torch.no_grad():
         out_smp = model_smp(x_orig)
     assert out_smp.shape == (2, 1, 256, 256)
+
+    print("\n=== Testing Pre-trained SMP MobileNet Lite (50% Decoder) ===")
+    model_smp_lite = SMP_MobileNet_Lite()
+    print(f"Total Trainable Parameters (SMP Lite): {count_parameters(model_smp_lite):,}")
+    model_smp_lite.train()
+    outputs_smp_lite = model_smp_lite(x_orig)
+    assert len(outputs_smp_lite) == 4
+    model_smp_lite.eval()
+    with torch.no_grad():
+        out_smp_lite = model_smp_lite(x_orig)
+    assert out_smp_lite.shape == (2, 1, 256, 256)
+
+    print("\n=== Testing Pre-trained SMP MobileNetV3 Micro (Small Encoder + 25% Decoder) ===")
+    model_smp_micro = SMP_MobileNetV3_Micro()
+    print(f"Total Trainable Parameters (SMP Micro): {count_parameters(model_smp_micro):,}")
+    model_smp_micro.train()
+    outputs_smp_micro = model_smp_micro(x_orig)
+    assert len(outputs_smp_micro) == 4
+    model_smp_micro.eval()
+    with torch.no_grad():
+        out_smp_micro = model_smp_micro(x_orig)
+    assert out_smp_micro.shape == (2, 1, 256, 256)
 
     print("All tests passed successfully!")
 

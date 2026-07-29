@@ -955,10 +955,55 @@ class SMP_UNet(nn.Module):
         
     def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
         final_out = self.model(x)
-        
         if self.training:
-            # SMP mặc định không xuất Deep Supervision, nên ta trả về list 4 phần tử giống hệt nhau
-            # để không làm hỏng hàm Loss (DeepSupervisionLoss) đang được set up trong train.py.
+            return [final_out, final_out, final_out, final_out]
+        else:
+            return final_out
+
+
+class SMP_MobileNet_Lite(nn.Module):
+    """
+    Phiên bản ép cân: Giữ nguyên MobileNetV2 nhưng giảm 50% số kênh của Decoder.
+    Giảm từ 6.6M xuống ~3M tham số.
+    """
+    def __init__(self, in_channels=1, out_channels=1):
+        super().__init__()
+        import segmentation_models_pytorch as smp
+        self.model = smp.Unet(
+            encoder_name="mobilenet_v2",
+            encoder_weights="imagenet",
+            decoder_channels=(128, 64, 32, 16, 8),
+            in_channels=in_channels,
+            classes=out_channels,
+        )
+        
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        final_out = self.model(x)
+        if self.training:
+            return [final_out, final_out, final_out, final_out]
+        else:
+            return final_out
+
+
+class SMP_MobileNetV3_Micro(nn.Module):
+    """
+    Phiên bản siêu nhẹ: Đổi sang timm-mobilenetv3_small_100 và ép tối đa Decoder.
+    Tổng tham số < 1.5M.
+    """
+    def __init__(self, in_channels=1, out_channels=1):
+        super().__init__()
+        import segmentation_models_pytorch as smp
+        self.model = smp.Unet(
+            encoder_name="timm-mobilenetv3_small_100",
+            encoder_weights="imagenet",
+            decoder_channels=(64, 32, 16, 8, 4),
+            in_channels=in_channels,
+            classes=out_channels,
+        )
+        
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        final_out = self.model(x)
+        if self.training:
             return [final_out, final_out, final_out, final_out]
         else:
             return final_out
