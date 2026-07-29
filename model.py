@@ -936,6 +936,82 @@ class Ghost_UNet(nn.Module):
             return final_out
 
 
+# --- CÁC COMPONENT GHOST_CA_UNET (SỰ KẾT HỢP ĐỘT PHÁ) ---
+
+class GhostCAUp(nn.Module):
+    def __init__(self, in_chs: int, skip_chs: int, out_chs: int):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.ca = CoordAtt(skip_chs, skip_chs, reduction=4)
+        self.ghost_bot = GhostBottleneck(in_chs + skip_chs, out_chs)
+        
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        skip = self.ca(skip)
+        x = torch.cat([skip, x], dim=1)
+        return self.ghost_bot(x)
+
+
+class Ghost_CA_UNet(nn.Module):
+    """
+    Sự kết hợp tinh hoa giữa GhostBottleneck (giảm 50% tham số) và CA_UNet (Channel Attention).
+    Mục tiêu: Đạt Dice > 0.88 với số tham số ~310k.
+    """
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        
+        self.inc = GhostBottleneck(in_channels, c)
+        
+        self.down1 = GhostDown(c, c * 2)
+        self.down2 = GhostDown(c * 2, c * 4)
+        self.down3 = GhostDown(c * 4, c * 8)
+        self.down4 = GhostDown(c * 8, c * 16)
+        
+        # Vẫn giữ ASPP để nắm bắt đa ngữ cảnh (Multiscale context)
+        self.aspp = LightweightASPP(c * 16, c * 16)
+        
+        self.up1 = GhostCAUp(c * 16, c * 8, c * 8)
+        self.up2 = GhostCAUp(c * 8, c * 4, c * 4)
+        self.up3 = GhostCAUp(c * 4, c * 2, c * 2)
+        self.up4 = GhostCAUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        # Deep Supervision Layers
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        x5 = self.aspp(x5)
+        
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
 # --- PRE-TRAINED UNET (SMP) ---
 
 class SMP_UNet(nn.Module):

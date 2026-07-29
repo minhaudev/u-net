@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, SMP_MobileNet_Lite, SMP_MobileNetV3_Micro, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, SMP_MobileNet_Lite, SMP_MobileNetV3_Micro, Ghost_CA_UNet, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -103,6 +103,17 @@ def main():
     with torch.no_grad():
         out_smp = model_smp(x_orig)
     assert out_smp.shape == (2, 1, 256, 256)
+
+    print("\n=== Testing The Ultimate Breakthrough (Ghost-CA-UNet) ===")
+    model_ghost_ca = Ghost_CA_UNet()
+    print(f"Total Trainable Parameters (Ghost-CA-UNet): {count_parameters(model_ghost_ca):,}")
+    model_ghost_ca.train()
+    outputs_ghost_ca = model_ghost_ca(x_orig)
+    assert len(outputs_ghost_ca) == 4
+    model_ghost_ca.eval()
+    with torch.no_grad():
+        out_ghost_ca = model_ghost_ca(x_orig)
+    assert out_ghost_ca.shape == (2, 1, 256, 256)
 
     print("\n=== Testing Pre-trained SMP MobileNet Lite (50% Decoder) ===")
     model_smp_lite = SMP_MobileNet_Lite()

@@ -19,7 +19,7 @@ from dataset import (
     discover_predefined_split_samples,
 )
 from losses import dice_score_from_logits, FocalTverskyLoss, DeepSupervisionLoss
-from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, SMP_MobileNet_Lite, SMP_MobileNetV3_Micro, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, SMP_MobileNet_Lite, SMP_MobileNetV3_Micro, Ghost_CA_UNet, count_parameters
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--include-normal", action="store_true")
     parser.add_argument("--cpu", action="store_true")
-    parser.add_argument("--input-mode", type=str, default="gating", choices=["gating", "orig", "clahe", "fusion", "ca_unet", "eca_unet", "simam_unet", "ema_unet", "ghost_unet", "smp_mobilenet", "smp_lite", "smp_micro"], help="Chọn nhánh để test ablation")
+    parser.add_argument("--input-mode", type=str, default="gating", choices=["gating", "orig", "clahe", "fusion", "ca_unet", "eca_unet", "simam_unet", "ema_unet", "ghost_unet", "ghost_ca_unet", "smp_mobilenet", "smp_lite", "smp_micro"], help="Chọn nhánh để test ablation")
     return parser.parse_args()
 
 
@@ -231,6 +231,12 @@ def main() -> None:
         ).to(device)
     elif args.input_mode == "ghost_unet":
         model = Ghost_UNet(
+            in_channels=1,
+            out_channels=1,
+            base_channels=args.base_channels,
+        ).to(device)
+    elif args.input_mode == "ghost_ca_unet":
+        model = Ghost_CA_UNet(
             in_channels=1,
             out_channels=1,
             base_channels=args.base_channels,
