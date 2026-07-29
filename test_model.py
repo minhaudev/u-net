@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -68,6 +68,29 @@ def main():
     with torch.no_grad():
         out_simam = model_simam(x_orig)
     assert out_simam.shape == (2, 1, 256, 256)
+
+
+    print("\n=== Testing EMA-UNet (Efficient Multi-Scale Attention) ===")
+    model_ema = EMA_UNet(in_channels=1, out_channels=1, base_channels=16)
+    print(f"Total Trainable Parameters (EMA-UNet): {count_parameters(model_ema):,}")
+    model_ema.train()
+    outputs_ema = model_ema(x_orig)
+    assert len(outputs_ema) == 4
+    model_ema.eval()
+    with torch.no_grad():
+        out_ema = model_ema(x_orig)
+    assert out_ema.shape == (2, 1, 256, 256)
+
+    print("\n=== Testing Ghost-UNet (50% Params Reduction) ===")
+    model_ghost = Ghost_UNet(in_channels=1, out_channels=1, base_channels=16)
+    print(f"Total Trainable Parameters (Ghost-UNet): {count_parameters(model_ghost):,}")
+    model_ghost.train()
+    outputs_ghost = model_ghost(x_orig)
+    assert len(outputs_ghost) == 4
+    model_ghost.eval()
+    with torch.no_grad():
+        out_ghost = model_ghost(x_orig)
+    assert out_ghost.shape == (2, 1, 256, 256)
 
 
     print("All tests passed successfully!")

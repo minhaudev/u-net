@@ -715,5 +715,226 @@ class SimAM_UNet(nn.Module):
             return final_out
 
 
+# --- CÁC COMPONENT EMA_UNET (EFFICIENT MULTI-SCALE ATTENTION) ---
+
+class EMA_Module(nn.Module):
+    """
+    Efficient Multi-Scale Attention (EMA)
+    Trích xuất đặc trưng đa tỷ lệ (1x1 và 3x3) và kết hợp chéo không gian.
+    Phiên bản thu gọn cho ảnh y tế nhỏ.
+    """
+    def __init__(self, channels, groups=8):
+        super(EMA_Module, self).__init__()
+        self.groups = max(1, channels // groups)
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.conv1x1 = nn.Conv2d(channels, channels, kernel_size=1, groups=self.groups, bias=False)
+        self.conv3x3 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=self.groups, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        
+        # Branch 1: 1x1 conv với cross-spatial pooling
+        x_h = self.pool_h(x)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)
+        y1 = torch.cat([x_h, x_w], dim=2)
+        y1 = self.conv1x1(y1)
+        x_h, x_w = torch.split(y1, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+        branch1 = x * self.sigmoid(x_h) * self.sigmoid(x_w)
+        
+        # Branch 2: 3x3 conv (local patterns)
+        branch2 = self.conv3x3(x)
+        
+        # Aggregate
+        global_b1 = self.agp(branch1)
+        global_b2 = self.agp(branch2)
+        weight1 = torch.softmax(global_b1, dim=1)
+        weight2 = torch.softmax(global_b2, dim=1)
+        
+        out = branch1 * weight1 + branch2 * weight2
+        return out
+
+
+class EMAUp(nn.Module):
+    def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.ema = EMA_Module(skip_channels)
+        self.conv = ResidualDSConv(in_channels + skip_channels, out_channels)
+        
+    def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        x = self.up(x)
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        skip = self.ema(skip)
+        x = torch.cat([skip, x], dim=1)
+        return self.conv(x)
+
+
+class EMA_UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        self.inc = ResidualDSConv(in_channels, c)
+        
+        self.down1 = AttDown(c, c * 2)
+        self.down2 = AttDown(c * 2, c * 4)
+        self.down3 = AttDown(c * 4, c * 8)
+        self.down4 = AttDown(c * 8, c * 16)
+        
+        self.up1 = EMAUp(c * 16, c * 8, c * 8)
+        self.up2 = EMAUp(c * 8, c * 4, c * 4)
+        self.up3 = EMAUp(c * 4, c * 2, c * 2)
+        self.up4 = EMAUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
+# --- CÁC COMPONENT GHOST_UNET (GIẢM 50% THAM SỐ) ---
+
+class GhostModule(nn.Module):
+    def __init__(self, inp, oup, kernel_size=1, ratio=2, dw_size=3, stride=1, relu=True):
+        super(GhostModule, self).__init__()
+        import math
+        self.oup = oup
+        init_channels = math.ceil(oup / ratio)
+        new_channels = init_channels * (ratio - 1)
+
+        self.primary_conv = nn.Sequential(
+            nn.Conv2d(inp, init_channels, kernel_size, stride, kernel_size//2, bias=False),
+            nn.BatchNorm2d(init_channels),
+            nn.ReLU(inplace=True) if relu else nn.Sequential(),
+        )
+
+        self.cheap_operation = nn.Sequential(
+            nn.Conv2d(init_channels, new_channels, dw_size, 1, dw_size//2, groups=init_channels, bias=False),
+            nn.BatchNorm2d(new_channels),
+            nn.ReLU(inplace=True) if relu else nn.Sequential(),
+        )
+
+    def forward(self, x):
+        x1 = self.primary_conv(x)
+        x2 = self.cheap_operation(x1)
+        out = torch.cat([x1, x2], dim=1)
+        return out[:, :self.oup, :, :]
+
+
+class GhostBottleneck(nn.Module):
+    def __init__(self, in_chs, out_chs, stride=1):
+        super(GhostBottleneck, self).__init__()
+        self.ghost1 = GhostModule(in_chs, out_chs, kernel_size=1, relu=True)
+        self.ghost2 = GhostModule(out_chs, out_chs, kernel_size=1, relu=False)
+        if stride == 1 and in_chs == out_chs:
+            self.shortcut = nn.Sequential()
+        else:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_chs, in_chs, 3, stride=stride, padding=1, groups=in_chs, bias=False),
+                nn.Conv2d(in_chs, out_chs, 1, stride=1, padding=0, bias=False),
+                nn.BatchNorm2d(out_chs),
+            )
+    def forward(self, x):
+        return self.ghost2(self.ghost1(x)) + self.shortcut(x)
+
+
+class GhostDown(nn.Module):
+    def __init__(self, in_chs, out_chs):
+        super().__init__()
+        self.mpool = nn.MaxPool2d(2)
+        self.ghost_bot = GhostBottleneck(in_chs, out_chs)
+    def forward(self, x):
+        return self.ghost_bot(self.mpool(x))
+
+
+class GhostUp(nn.Module):
+    def __init__(self, in_chs, skip_chs, out_chs):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.ghost_bot = GhostBottleneck(in_chs + skip_chs, out_chs)
+    def forward(self, x, skip):
+        x = self.up(x)
+        diffY = skip.size()[2] - x.size()[2]
+        diffX = skip.size()[3] - x.size()[3]
+        if diffY > 0 or diffX > 0:
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        x = torch.cat([skip, x], dim=1)
+        return self.ghost_bot(x)
+
+
+class Ghost_UNet(nn.Module):
+    def __init__(self, in_channels: int = 1, out_channels: int = 1, base_channels: int = 16) -> None:
+        super().__init__()
+        c = base_channels
+        self.inc = GhostBottleneck(in_channels, c)
+        
+        self.down1 = GhostDown(c, c * 2)
+        self.down2 = GhostDown(c * 2, c * 4)
+        self.down3 = GhostDown(c * 4, c * 8)
+        self.down4 = GhostDown(c * 8, c * 16)
+        
+        self.up1 = GhostUp(c * 16, c * 8, c * 8)
+        self.up2 = GhostUp(c * 8, c * 4, c * 4)
+        self.up3 = GhostUp(c * 4, c * 2, c * 2)
+        self.up4 = GhostUp(c * 2, c, c)
+        
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
+        
+        self.outc_ds1 = nn.Conv2d(c * 8, out_channels, kernel_size=1)
+        self.outc_ds2 = nn.Conv2d(c * 4, out_channels, kernel_size=1)
+        self.outc_ds3 = nn.Conv2d(c * 2, out_channels, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        d1 = self.up1(x5, x4)
+        d2 = self.up2(d1, x3)
+        d3 = self.up3(d2, x2)
+        d4 = self.up4(d3, x1)
+        
+        final_out = self.outc(d4)
+        
+        if self.training:
+            out_ds1 = self.outc_ds1(d1)
+            out_ds2 = self.outc_ds2(d2)
+            out_ds3 = self.outc_ds3(d3)
+            return [final_out, out_ds1, out_ds2, out_ds3]
+        else:
+            return final_out
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
