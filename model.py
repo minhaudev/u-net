@@ -936,5 +936,33 @@ class Ghost_UNet(nn.Module):
             return final_out
 
 
+# --- PRE-TRAINED UNET (SMP) ---
+
+class SMP_UNet(nn.Module):
+    """
+    Sử dụng kiến trúc U-Net từ thư viện segmentation_models_pytorch 
+    với Encoder siêu nhẹ (VD: mobilenet_v2) đã được pre-train trên ImageNet.
+    """
+    def __init__(self, encoder_name="mobilenet_v2", encoder_weights="imagenet", in_channels=1, out_channels=1):
+        super().__init__()
+        import segmentation_models_pytorch as smp
+        self.model = smp.Unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            in_channels=in_channels,
+            classes=out_channels,
+        )
+        
+    def forward(self, x: torch.Tensor, _x_clahe: torch.Tensor = None) -> torch.Tensor | list[torch.Tensor]:
+        final_out = self.model(x)
+        
+        if self.training:
+            # SMP mặc định không xuất Deep Supervision, nên ta trả về list 4 phần tử giống hệt nhau
+            # để không làm hỏng hàm Loss (DeepSupervisionLoss) đang được set up trong train.py.
+            return [final_out, final_out, final_out, final_out]
+        else:
+            return final_out
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

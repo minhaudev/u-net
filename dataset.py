@@ -206,6 +206,26 @@ class BUSIDataset(Dataset):
         self.samples = samples
         self.image_size = image_size
         self.augment = augment
+        
+        import albumentations as A
+        from albumentations.pytorch import ToTensorV2
+
+        # Định nghĩa các phép augment mạnh cho dữ liệu Y tế
+        if self.augment:
+            self.transform = A.Compose([
+                A.Resize(image_size, image_size),
+                A.HorizontalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.5),
+                A.ElasticTransform(alpha=1, sigma=50, alpha_affine=50, p=0.3),
+                A.GridDistortion(p=0.3),
+                A.RandomBrightnessContrast(p=0.3),
+                ToTensorV2(),
+            ], additional_targets={'clahe': 'image'})
+        else:
+            self.transform = A.Compose([
+                A.Resize(image_size, image_size),
+                ToTensorV2(),
+            ], additional_targets={'clahe': 'image'})
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -217,60 +237,30 @@ class BUSIDataset(Dataset):
         clahe_image = apply_clahe(image)
         mask = load_merged_mask(sample.mask_paths, image.size)
 
-        image = TF.resize(
-            image,
-            [self.image_size, self.image_size],
-            interpolation=InterpolationMode.BILINEAR,
-        )
-        clahe_image = TF.resize(
-            clahe_image,
-            [self.image_size, self.image_size],
-            interpolation=InterpolationMode.BILINEAR,
-        )
-        mask = TF.resize(
-            mask,
-            [self.image_size, self.image_size],
-            interpolation=InterpolationMode.NEAREST,
-        )
+        # Albumentations yêu cầu numpy array
+        image_np = np.array(image)
+        clahe_np = np.array(clahe_image)
+        mask_np = np.array(mask)
 
-        if self.augment:
-            if random.random() < 0.5:
-                image = TF.hflip(image)
-                clahe_image = TF.hflip(clahe_image)
-                mask = TF.hflip(mask)
-
-            angle = random.uniform(-12.0, 12.0)
-            image = TF.rotate(
-                image,
-                angle,
-                interpolation=InterpolationMode.BILINEAR,
-                fill=0,
-            )
-            clahe_image = TF.rotate(
-                clahe_image,
-                angle,
-                interpolation=InterpolationMode.BILINEAR,
-                fill=0,
-            )
-            mask = TF.rotate(
-                mask,
-                angle,
-                interpolation=InterpolationMode.NEAREST,
-                fill=0,
-            )
-
-            if random.random() < 0.5:
-                contrast_factor = random.uniform(0.85, 1.15)
-                image = TF.adjust_contrast(image, contrast_factor)
-                clahe_image = TF.adjust_contrast(clahe_image, contrast_factor)
-            if random.random() < 0.3:
-                brightness_factor = random.uniform(0.90, 1.10)
-                image = TF.adjust_brightness(image, brightness_factor)
-                clahe_image = TF.adjust_brightness(clahe_image, brightness_factor)
-
-        image_t = TF.to_tensor(image)  # [1,H,W], 0..1
-        clahe_t = TF.to_tensor(clahe_image)
-        mask_t = (TF.to_tensor(mask) > 0.5).float()
+        transformed = self.transform(image=image_np, clahe=clahe_np, mask=mask_np)
+        
+        # Albumentations trả về tensor. Ảnh xám (H, W) -> cần unsqueeze(0) thành (1, H, W)
+        image_t = transformed['image'].float() / 255.0
+        if image_t.ndim == 2:
+            image_t = image_t.unsqueeze(0)
+            
+        clahe_t = transformed['clahe'].float() / 255.0
+        if clahe_t.ndim == 2:
+            clahe_t = clahe_t.unsqueeze(0)
+            
+        mask_t = transformed['mask'].float()
+        if mask_t.ndim == 2:
+            mask_t = mask_t.unsqueeze(0)
+        
+        # Binary mask theo ngưỡng
+        mask_t = (mask_t > 0).float()
+        if mask_t.max() > 1.0: # Đề phòng mask 0-255
+            mask_t = (mask_t > 0.5).float()
 
         return {
             "image": image_t,

@@ -1,5 +1,5 @@
 import torch
-from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, count_parameters
+from model import UNet, AttentionUNetFusion, CA_UNet, ECA_UNet, SimAM_UNet, EMA_UNet, Ghost_UNet, SMP_UNet, count_parameters
 
 def main():
     print("=== Testing Ultra-lightweight U-Net (Baseline) ===")
@@ -92,6 +92,17 @@ def main():
         out_ghost = model_ghost(x_orig)
     assert out_ghost.shape == (2, 1, 256, 256)
 
+
+    print("\n=== Testing Pre-trained SMP UNet (MobileNetV2) ===")
+    model_smp = SMP_UNet(encoder_name="mobilenet_v2")
+    print(f"Total Trainable Parameters (SMP MobileNetV2): {count_parameters(model_smp):,}")
+    model_smp.train()
+    outputs_smp = model_smp(x_orig)
+    assert len(outputs_smp) == 4
+    model_smp.eval()
+    with torch.no_grad():
+        out_smp = model_smp(x_orig)
+    assert out_smp.shape == (2, 1, 256, 256)
 
     print("All tests passed successfully!")
 
